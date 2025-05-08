@@ -1,90 +1,97 @@
-# Projeto DevSecOps - Infraestrutura na AWS com Docker (Simulação Terminal)
+#!/bin/bash
 
-# 1. Criar VPC
-aws ec2 create-vpc --cidr-block 10.0.0.0/16
+# 1. Instalação via Script de Start Instance (user_data.sh)
 
-# Criar subnets públicas
-aws ec2 create-subnet --vpc-id vpc-12345678 --cidr-block 10.0.1.0/24 --availability-zone us-east-1a
-aws ec2 create-subnet --vpc-id vpc-12345678 --cidr-block 10.0.2.0/24 --availability-zone us-east-1b
+# Atualizar pacotes e instalar Docker
+apt-get update -y
+apt-get install docker.io -y
 
-# Criar subnets privadas
-aws ec2 create-subnet --vpc-id vpc-12345678 --cidr-block 10.0.3.0/24 --availability-zone us-east-1a
-aws ec2 create-subnet --vpc-id vpc-12345678 --cidr-block 10.0.4.0/24 --availability-zone us-east-1b
+# Iniciar o serviço Docker
+systemctl start docker
+systemctl enable docker
 
-# Criar e associar Internet Gateway
-aws ec2 create-internet-gateway
-aws ec2 attach-internet-gateway --vpc-id vpc-12345678 --internet-gateway-id igw-12345678
+# Baixar a imagem do Wordpress
+docker pull wordpress:latest
 
-# Criar NAT Gateway em subnet pública
-aws ec2 allocate-address --domain vpc
-aws ec2 create-nat-gateway --subnet-id subnet-10.0.1.0 --allocation-id eipalloc-12345678
-
-# 2. Criar RDS MySQL
+# Criar uma instância RDS com MySQL
 aws rds create-db-instance \
-  --db-instance-identifier devsecops-db \
+  --db-instance-identifier wordpress-db \
   --db-instance-class db.t3.micro \
   --engine mysql \
   --allocated-storage 20 \
-  --vpc-security-group-ids sg-db \
-  --db-subnet-group-name my-private-subnet-group \
   --master-username admin \
-  --master-user-password secret123
+  --master-user-password <senha_do_banco> \
+  --vpc-security-group-ids sg-xxxxxxxx \
+  --no-publicly-accessible \
+  --db-name wordpressdb
 
-# 3. Criar EFS
-aws efs create-file-system --creation-token devsecops-efs
+# Rodar o container do Wordpress
+docker run -d -p 8080:80 --name wordpress --link db:mysql -e WORDPRESS_DB_PASSWORD=<senha_do_banco> wordpress
 
-# Criar mount targets para cada subnet privada
-aws efs create-mount-target --file-system-id fs-1234 --subnet-id subnet-10.0.3.0 --security-groups sg-efs
-aws efs create-mount-target --file-system-id fs-1234 --subnet-id subnet-10.0.4.0 --security-groups sg-efs
+# 2. Efetuar Deploy de uma Aplicação Wordpress
 
-# 4. Criar Launch Template com Docker e montagem do EFS
-echo "#!/bin/bash
-sudo apt update -y
-sudo apt install docker.io -y
-sudo systemctl start docker
-sudo systemctl enable docker
-sudo mkdir /mnt/efs
-sudo apt install -y nfs-common
-sudo mount -t nfs4 -o nfsvers=4.1 fs-1234.efs.us-east-1.amazonaws.com:/ /mnt/efs
-docker run -d -p 80:80 my-app-image
-" > user_data.sh
+# Criar o container Wordpress e conectá-lo ao RDS
+docker run -d -p 8080:80 --name wordpress --link db:mysql -e WORDPRESS_DB_PASSWORD=<senha_do_banco> wordpress
 
-aws ec2 create-launch-template \
-  --launch-template-name devsecops-template \
-  --version-description v1 \
-  --launch-template-data file://template.json
+# 3. Configuração do Serviço EFS AWS para Arquivos Estáticos do Wordpress
 
-# 5. Criar Application Load Balancer
-aws elbv2 create-load-balancer --name devsecops-alb \
-  --subnets subnet-10.0.1.0 subnet-10.0.2.0 \
-  --security-groups sg-alb \
-  --scheme internet-facing \
-  --type application
+# Criar o EFS
+aws efs create-file-system \
+  --creation-token wordpress-efs \
+  --performance-mode generalPurpose \
+  --throughput-mode bursting
 
-aws elbv2 create-target-group \
-  --name devsecops-tg \
-  --protocol HTTP \
-  --port 80 \
-  --vpc-id vpc-12345678
+# Montar o EFS no container
+mount -t efs <id_do_efs>:/ /var/www/html
 
-aws elbv2 register-targets \
-  --target-group-arn arn:aws:elasticloadbalancing:... \
-  --targets Id=i-12345678
+# 4. Configuração do Serviço de Load Balancer AWS para a Aplicação Wordpress
 
-aws elbv2 create-listener \
-  --load-balancer-arn arn:aws:elasticloadbalancing:... \
-  --protocol HTTP \
-  --port 80 \
-  --default-actions Type=forward,TargetGroupArn=arn:aws:elasticloadbalancing:...
+# Criar Load Balancer
+aws elb create-load-balancer \
+  --load-balancer-name wordpress-lb \
+  --listeners Protocol=HTTP,LoadBalancerPort=80,InstanceProtocol=HTTP,InstancePort=8080 \
+  --subnets subnet-xxxxxxxx subnet-yyyyyyyy \
+  --security-groups sg-xxxxxxxx
 
-# 6. Configurar Security Groups
-# ALB: permite entrada 0.0.0.0/0 porta 80
-# EC2: permite entrada apenas do ALB porta 80
-# RDS: entrada só da EC2 porta 3306
-# EFS: entrada só da EC2 porta 2049
+# Configurar o Health Check
+aws elb configure-health-check \
+  --load-balancer-name wordpress-lb \
+  --health-check Target=HTTP:8080/wp-admin/install.php,Interval=30,UnhealthyThreshold=2,HealthyThreshold=2,Timeout=5
 
-# 7. Acessar Load Balancer
-curl http://devsecops-alb-123456.elb.amazonaws.com
+# 5. Pontos de Atenção
 
-# Esperado:
-# Aplicação DevSecOps funcionando corretamente!
+# Não utilizar IP público para saída do serviço Wordpress
+# A aplicação não será exposta diretamente via IP público, apenas através do Load Balancer.
+
+# 6. Dockerfile ou Docker Compose
+
+# Usando Docker Compose (se preferir ao invés de Dockerfile)
+echo "
+version: '3'
+services:
+  wordpress:
+    image: wordpress:latest
+    ports:
+      - '8080:80'
+    environment:
+      WORDPRESS_DB_PASSWORD: <senha_do_banco>
+    volumes:
+      - wordpress_data:/var/www/html
+  db:
+    image: mysql:5.7
+    environment:
+      MYSQL_ROOT_PASSWORD: <senha_do_banco>
+    volumes:
+      - db_data:/var/lib/mysql
+volumes:
+  wordpress_data:
+  db_data:
+" > docker-compose.yml
+
+# Iniciar containers
+docker-compose up -d
+
+# 7. Demonstração da Aplicação Wordpress
+
+# Acesse a URL fornecida pelo Load Balancer para ver a tela de login do Wordpress.
+# O Wordpress deve estar rodando na porta 8080.
