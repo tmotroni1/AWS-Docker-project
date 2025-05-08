@@ -1,4 +1,4 @@
-#!/bin/bash
+# Projeto WordPress com Docker, RDS, EFS e Load Balancer na AWS
 
 # 1. Instalação via Script de Start Instance (user_data.sh)
 
